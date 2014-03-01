@@ -17,8 +17,12 @@ package de.firtecy.voiceredirectgoogle;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Timer;
+import java.util.TimerTask;
 
+import android.app.ActivityManager;
 import android.app.Service;
+import android.content.ComponentName;
 import android.content.Intent;
 import android.os.Bundle;
 import android.os.Handler;
@@ -28,45 +32,47 @@ import android.os.Messenger;
 import android.os.RemoteCallbackList;
 import android.os.RemoteException;
 import android.util.Log;
-import android.speech.jarvis.IJarvis;
-import android.speech.jarvis.IJarvisCallback;
+import android.speech.jarvis.IWakeUpService;
+import android.speech.jarvis.IWakeUpServiceCallback;
 
 public class ProxyService extends Service {
 
+    public static ProxyService sService;
+    
     public static final int MSG_REGISTER_CLIENT = 1;
     public static final int MSG_UNREGISTER_CLIENT = 2;
     
     private static final String TAG = "JarvisServiceApp";
     
-    private static final Intent INTENT_GOOGLE_VOICE_SEARCH;
-    
-    static {
-        INTENT_GOOGLE_VOICE_SEARCH = new Intent();
-        INTENT_GOOGLE_VOICE_SEARCH.setClassName("com.google.android.googlequicksearchbox",
-            "com.google.android.googlequicksearchbox.VoiceSearchActivity");
-        INTENT_GOOGLE_VOICE_SEARCH.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
-                | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-    }
-    
-    private final IJarvis.Stub mBinder = new IJarvis.Stub() {
-        public int getTargetedApi() { return 1; }
+    private final IWakeUpService.Stub mBinder = new IWakeUpService.Stub() {
 
-        public long getLastChange() { return 0; }
-
-        public int getCountWords() { return 0; }
-
-        public String getWordAt(int i) { return null; }
-
-        public boolean isReady() { return true; }
-
-        public boolean handleStrings(List<String> var) {
-            if(var.get(1).contains("Jarvis")) {
-                startActivity(new Intent(INTENT_GOOGLE_VOICE_SEARCH));
+        public boolean onReceivedWakeUp(String input) {
+            sService = ProxyService.this;
+            if(input.contains("Jarvis")) {
+                startActivity(new Intent(ProxyService.this, ProxyActivity.class)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                
+                if(mTimer != null)
+                    mTimer.cancel();
+                
+                mTimer = new Timer();
+                mTimer.scheduleAtFixedRate(new TimerTask() {
+                    @Override
+                    public void run() {
+                        ComponentName component = getActiveActivity();
+                        if(!isGoogleSearch(component)) {
+                            releaseBlock();
+                            mTimer.cancel();
+                            mTimer = null;
+                        }
+                    }
+                }, 7000, 1000);
+                
                 return true;
             } else return false;
         }
 
-        public boolean registerCallback(IJarvisCallback cb) {
+        public boolean registerCallback(IWakeUpServiceCallback cb) {
             if (cb != null) {
                 mCallbacks.register(cb);
                 return true;
@@ -74,7 +80,7 @@ public class ProxyService extends Service {
             return false;
         }
 
-        public boolean unregisterCallback(IJarvisCallback cb) {
+        public boolean unregisterCallback(IWakeUpServiceCallback cb) {
             if (cb != null) {
                 mCallbacks.unregister(cb);
                 return true;
@@ -82,20 +88,82 @@ public class ProxyService extends Service {
             return false;
         }
     };
+    
+    private Timer mTimer;
 
 	/**
      * This is a list of callbacks that have been registered with the
      * service.  Note that this is package scoped (instead of private) so
      * that it can be accessed more efficiently from inner classes.
      */
-    final RemoteCallbackList<IJarvisCallback> mCallbacks
-            = new RemoteCallbackList<IJarvisCallback>();
+    final RemoteCallbackList<IWakeUpServiceCallback> mCallbacks
+            = new RemoteCallbackList<IWakeUpServiceCallback>();
 
+    public void acquireBlock() {
+        // Broadcast to all clients the new value.
+        final int N = mCallbacks.beginBroadcast();
+        for (int i=0; i<N; i++) {
+            try {
+                mCallbacks.getBroadcastItem(i).acquireBlock();
+            } catch (RemoteException e) {
+                // The RemoteCallbackList will take care of removing
+                // the dead object for us.
+            }
+        }
+        mCallbacks.finishBroadcast();
+    }
+    
+    public void releaseBlock() {
+        // Broadcast to all clients the new value.
+        final int N = mCallbacks.beginBroadcast();
+        for (int i=0; i<N; i++) {
+            try {
+                mCallbacks.getBroadcastItem(i).releaseBlock();
+            } catch (RemoteException e) {
+                // The RemoteCallbackList will take care of removing
+                // the dead object for us.
+            }
+        }
+        mCallbacks.finishBroadcast();
+    }
+    
+    public boolean isGoogleSearch(ComponentName na) {
+        String pa = na.getPackageName();
+        String cl = na.getClassName();
+        
+        if(!pa.equals("com.google.android.googlequicksearchbox"))
+            return false;
+        
+        if(!cl.equals("com.google.android.googlequicksearchbox.VoiceSearchActivity")
+                && !cl.equals("com.google.android.voicesearch.SendSmsActivity")
+                && !cl.equals("com.google.android.velvet.ui.InAppWebPageActivity")
+                && !cl.equals("com.google.android.sidekick.main.secondscreen.SecondScreenActivity")
+                && !cl.endsWith(".SearchActivity")
+                && !cl.equals("com.google.android.velvet.ui.VelvetActivity")
+                && !cl.endsWith(".VoiceSearchActivity")
+                && !cl.equals("com.google.android.sidekick.main.RemindersListActivity")
+                && !cl.equals("com.google.android.velvet.ui.VelvetIntentDispatcher")
+                && !cl.equals("com.google.android.search.core.google.GoogleSearch"))
+            return false;
+        return true;
+    }
+    
     @Override
     public IBinder onBind(Intent intent) {
         if(intent.getAction().equals(Intent.ACTION_JARVIS_VOICE_CONTROL)) {
             return mBinder;
         }
         return null;
+    }
+    
+    public void gotRequestFromGoogle() {
+        Log.i(TAG, "Google activity finished");
+    }
+    
+    public ComponentName getActiveActivity() {
+        ActivityManager am = (ActivityManager)getSystemService(ACTIVITY_SERVICE);
+        List<ActivityManager.RunningTaskInfo> taskInfo = am.getRunningTasks(1); 
+        
+        return taskInfo.get(0).topActivity;
     }
 }
